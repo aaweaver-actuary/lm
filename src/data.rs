@@ -1,3 +1,5 @@
+// src/data.rs
+
 use crate::real_matrix::RealMatrix;
 
 /// A struct representing the data for a linear regression model. This struct always maintains

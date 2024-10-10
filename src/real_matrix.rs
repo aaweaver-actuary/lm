@@ -1,8 +1,25 @@
+// src/real_matrix.rs
+
 use ndarray::Array2;
 
+/// A struct representing a matrix of real numbers. The RealMatrix struct is a wrapper around
+/// the ndarray::Array2 type, which is a two-dimensional array that is optimized for numerical
+/// computations. The RealMatrix struct provides a more user-friendly interface for working with
+/// the subset of ndarray's functionality that is needed for this project.
+///
+/// The RealMatrix struct is used to represent the x and y matrices in the linear regression model,
+/// and is the primary data structure used to store the data for the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RealMatrix {
     pub values: Array2<f64>,
+}
+
+impl Iterator for RealMatrix {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.values.iter().next().copied()
+    }
 }
 
 impl RealMatrix {
@@ -19,6 +36,18 @@ impl RealMatrix {
     pub fn dot(&self, other: &RealMatrix) -> RealMatrix {
         RealMatrix {
             values: self.values.dot(&other.values),
+        }
+    }
+
+    pub fn transpose(&self) -> RealMatrix {
+        RealMatrix {
+            values: self.values.to_owned().t(),
+        }
+    }
+
+    pub fn plus(&self, other: &RealMatrix) -> RealMatrix {
+        RealMatrix {
+            values: &self.values + &other.values,
         }
     }
 

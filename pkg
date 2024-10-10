@@ -1,54 +1,112 @@
+// src/main.rs
+
+fn main() {
+    println!("Hello, world!");
+}
+// src/real_matrix.rs
+
 use ndarray::Array2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RealMatrix {
-    pub data: Array2<f64>,
+    pub values: Array2<f64>,
 }
 
 impl RealMatrix {
     pub fn new(data: Array2<f64>) -> Self {
-        RealMatrix { data }
+        RealMatrix { values: data }
     }
 
     pub fn with_shape(n_rows: usize, n_cols: usize) -> Self {
         RealMatrix {
-            data: Array2::<f64>::zeros((n_rows, n_cols)),
+            values: Array2::<f64>::zeros((n_rows, n_cols)),
+        }
+    }
+
+    pub fn dot(&self, other: &RealMatrix) -> RealMatrix {
+        RealMatrix {
+            values: self.values.dot(&other.values),
+        }
+    }
+
+    pub fn minus(&self, other: &RealMatrix) -> RealMatrix {
+        RealMatrix {
+            values: &self.values - &other.values,
         }
     }
 
     pub fn from_vec(data: Vec<f64>, n_rows: usize, n_cols: Option<usize>) -> Self {
         RealMatrix {
-            data: Array2::<f64>::from_shape_vec((n_rows, n_cols.unwrap_or(1)), data).unwrap(),
+            values: Array2::<f64>::from_shape_vec((n_rows, n_cols.unwrap_or(1)), data).unwrap(),
         }
     }
 
     pub fn as_slice(&self) -> Option<&[f64]> {
-        self.data.as_slice()
+        self.values.as_slice()
     }
 
     pub fn as_slice_mut(&mut self) -> Option<&mut [f64]> {
-        self.data.as_slice_mut()
+        self.values.as_slice_mut()
     }
 
     pub fn shape(&self) -> &[usize; 2] {
-        self.data
+        self.values
             .shape()
             .try_into()
             .expect("Shape should have exactly 2 elements")
     }
 
     pub fn n_rows(&self) -> usize {
-        self.data.shape()[0]
+        self.values.shape()[0]
     }
 
     pub fn n_cols(&self) -> usize {
-        self.data.shape()[1]
+        self.values.shape()[1]
     }
 
     pub fn is_vec(&self) -> bool {
         self.n_cols() == 1 || self.n_rows() == 1
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.values.ndim()
+    }
 }
+// src/data.rs
+
+use crate::real_matrix::RealMatrix;
+
+/// A struct representing the data for a linear regression model. This struct always maintains
+/// ownership of the data, and is used to pass the data safely between functions. This is
+/// the only copy of the data that is passed around, and it is never modified.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Data {
+    pub x: RealMatrix,
+    pub y: RealMatrix,
+}
+
+impl Data {
+    /// Create a new `Data` struct.
+    pub fn new(x: RealMatrix, y: RealMatrix) -> Self {
+        Data { x, y }
+    }
+
+    /// Return a reference to the x matrix.
+    pub fn x(&self) -> &RealMatrix {
+        &self.x
+    }
+
+    /// Return a reference to the y matrix.
+    pub fn y(&self) -> &RealMatrix {
+        &self.y
+    }
+}
+// src/errors.rs
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -67,58 +125,278 @@ pub enum FortranLeastSquaresError {
     #[error("Unknown error occurred in Fortran function call")]
     Unknown,
 }
-pub mod dqrls;
-pub mod errors;
-pub mod real_matrix;
 
-use ndarray::Array2;
+#[derive(Debug, Error)]
+pub enum LmFitterError {
+    #[error("Matrix dimensions mismatch: expected ({expected_rows}, {expected_cols}), found ({found_rows}, {found_cols})")]
+    DimensionMismatch {
+        expected_rows: usize,
+        expected_cols: usize,
+        found_rows: usize,
+        found_cols: usize,
+    },
+    #[error("Failed to convert RealMatrix to slice")]
+    SliceConversionFailure,
+    #[error("Null pointer detected during FFI call")]
+    NullPointer,
+    #[error("Unknown error occurred in Fortran function call")]
+    Unknown,
+    #[error("Failed to allocate memory for Fortran arrays")]
+    MemoryAllocationFailure,
+}
+// src/linear_model.rs
 
-pub struct QrDecomposition {
-    pub q: Array2<f64>,
-    pub r: Array2<f64>,
+use crate::fitters::fit::FitLinearModel;
+use crate::{Data, RealMatrix};
+use std::cmp::Ordering::{Equal, Greater, Less};
+
+#[derive(Debug, PartialEq)]
+pub enum LinearModel<'a> {
+    Fitted(FittedLinearModel<'a>),
+    Unfitted(UnfittedLinearModel<'a>),
 }
 
-pub fn check_that_x_is_a_2d_matrix(x: &Array2<f64>) {
+impl<'a> PartialOrd for LinearModel<'a> {
+    /// Compare two `LinearModel` instances. This is mainly useful for testing purposes. Fitted > Unfitted.
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (LinearModel::Fitted(_), LinearModel::Unfitted(_)) => Some(Greater),
+            (LinearModel::Unfitted(_), LinearModel::Fitted(_)) => Some(Less),
+            (LinearModel::Fitted(_), LinearModel::Fitted(_)) => Some(Equal),
+            (LinearModel::Unfitted(_), LinearModel::Unfitted(_)) => Some(Equal),
+        }
+    }
+}
+
+impl<'a> LinearModel<'a> {
+    pub fn new(data: &'a Data) -> Self {
+        LinearModel::Unfitted(UnfittedLinearModel::new(data))
+    }
+
+    pub fn update_coefficients(&mut self, coefficients: RealMatrix) {
+        match self {
+            LinearModel::Fitted(fitted) => fitted.update_coefficients(coefficients),
+            LinearModel::Unfitted(_) => (),
+        }
+    }
+
+    pub fn data(&self) -> &Data {
+        match self {
+            LinearModel::Fitted(fitted) => fitted.data,
+            LinearModel::Unfitted(unfitted) => unfitted.data,
+        }
+    }
+
+    pub fn x(&self) -> &RealMatrix {
+        match self {
+            LinearModel::Fitted(fitted) => &fitted.data.x(),
+            LinearModel::Unfitted(unfitted) => &unfitted.data.x(),
+        }
+    }
+
+    pub fn y(&self) -> &RealMatrix {
+        match self {
+            LinearModel::Fitted(fitted) => &fitted.data.y(),
+            LinearModel::Unfitted(unfitted) => &unfitted.data.y(),
+        }
+    }
+
+    pub fn fit(&mut self, fitter: &impl FitLinearModel) {
+        match self {
+            // If already fitted, re-fit the model.
+            LinearModel::Fitted(_) => {
+                self.update_coefficients(fitter.fit().unwrap());
+            }
+
+            // If unfitted, fit the model and update the enum variant.
+            LinearModel::Unfitted(unfitted_model) => {
+                *self = LinearModel::Fitted(FittedLinearModel {
+                    data: unfitted_model.data,
+                    coefficients: fitter.fit().unwrap(),
+                });
+            }
+        }
+    }
+
+    pub fn coefficients(&self) -> Option<&RealMatrix> {
+        match self {
+            LinearModel::Fitted(fitted) => Some(&fitted.coefficients),
+            LinearModel::Unfitted(_) => None,
+        }
+    }
+
+    pub fn residuals(&self) -> Option<RealMatrix> {
+        match self {
+            LinearModel::Fitted(fitted) => Some(fitted.residuals()),
+            LinearModel::Unfitted(_) => None,
+        }
+    }
+
+    pub fn predict(&self, x: Option<&RealMatrix>) -> Option<RealMatrix> {
+        match self {
+            LinearModel::Fitted(fitted) => Some(fitted.predict(x)),
+            LinearModel::Unfitted(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct FittedLinearModel<'a> {
+    pub data: &'a Data,
+    pub coefficients: RealMatrix,
+}
+
+impl<'a> FittedLinearModel<'a> {
+    pub fn new(data: &'a Data, coefficients: RealMatrix) -> Self {
+        FittedLinearModel { data, coefficients }
+    }
+
+    pub fn update_coefficients(&mut self, coefficients: RealMatrix) {
+        self.coefficients = coefficients;
+    }
+
+    pub fn predict(&self, x: Option<&RealMatrix>) -> RealMatrix {
+        match x {
+            // If x is provided, use it to make predictions.
+            Some(x) => x.dot(&self.coefficients),
+
+            // If x is not provided, use the data's x matrix to make predictions.
+            None => self.data.x().dot(&self.coefficients),
+        }
+    }
+
+    pub fn residuals(&self) -> RealMatrix {
+        self.data.y().minus(&self.predict(Some(self.data.x())))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct UnfittedLinearModel<'a> {
+    pub data: &'a Data,
+}
+
+impl<'a> UnfittedLinearModel<'a> {
+    pub fn new(data: &'a Data) -> Self {
+        UnfittedLinearModel { data }
+    }
+}
+// src/lib.rs
+
+pub mod data;
+pub mod dqrls;
+pub mod errors;
+pub mod fitters;
+pub mod linear_model;
+pub mod real_matrix;
+
+pub use data::Data;
+pub use real_matrix::RealMatrix;
+
+pub fn check_that_x_is_a_2d_matrix(x: &RealMatrix) {
     assert_eq!(x.ndim(), 2);
 }
 
-pub fn extract_dimensions_of_a_2d_matrix(x: &Array2<f64>) -> (usize, usize) {
+pub fn extract_dimensions_of_a_2d_matrix(x: &RealMatrix) -> (usize, usize) {
     (x.shape()[0], x.shape()[1])
 }
 
-pub fn check_that_x_and_y_have_the_same_number_of_rows(x: &Array2<f64>, y: &Array2<f64>) {
+pub fn check_that_x_and_y_have_the_same_number_of_rows(x: &RealMatrix, y: &RealMatrix) {
     assert_eq!(x.shape()[0], y.shape()[0]);
 }
 
-pub fn check_that_2d_matrix_x_is_numeric(x: &Array2<f64>) {
-    assert!(x.iter().all(|&v| v.is_finite()));
+pub fn check_that_2d_matrix_x_is_numeric(x: &RealMatrix) {
+    assert!(x.values.iter().all(|&v| v.is_finite()));
 }
 
-pub fn initialize_qr_decomposition(q: Array2<f64>, r: Array2<f64>) -> QrDecomposition {
-    QrDecomposition { q, r }
+pub fn initialize_qr_decomposition(_q: RealMatrix, _r: RealMatrix) {
+    todo!()
 }
 
-pub fn initialize_coefficients_vector(n: usize) -> Array2<f64> {
-    Array2::zeros((n, 1))
+pub fn initialize_coefficients_vector(n: usize) -> RealMatrix {
+    RealMatrix::with_shape(n, 1)
 }
 
-pub fn initialize_residuals_vector(n: usize) -> Array2<f64> {
-    Array2::zeros((n, 1))
+pub fn initialize_residuals_vector(n: usize) -> RealMatrix {
+    RealMatrix::with_shape(n, 1)
 }
 
-pub fn initialize_effects_vector(n: usize) -> Array2<f64> {
-    Array2::zeros((n, 1))
+pub fn initialize_effects_vector(n: usize) -> RealMatrix {
+    RealMatrix::with_shape(n, 1)
 }
 
-pub fn initialize_pivots_vector(n: usize) -> Array2<f64> {
-    Array2::zeros((n, 1))
+pub fn initialize_pivots_vector(n: usize) -> RealMatrix {
+    RealMatrix::with_shape(n, 1)
 }
 
-pub fn initialize_qr_auxiliary_matrix(n: usize) -> QrDecomposition {
-    let q = Array2::zeros((n, n));
-    let r = Array2::zeros((n, n));
+pub fn initialize_qr_auxiliary_matrix(n: usize) {
+    let q = RealMatrix::with_shape(n, n);
+    let r = RealMatrix::with_shape(n, n);
     initialize_qr_decomposition(q, r)
 }
+// src/fitters/mod.rs
+
+pub mod fit;
+pub mod qr_decomposition_fitter;
+// src/fitters/qr_decomposition_fitter.rs
+
+use super::fit::FitLinearModel;
+use crate::errors::{FortranLeastSquaresError, LmFitterError};
+use crate::linear_model::LinearModel;
+use crate::{Data, RealMatrix};
+use derive_builder::Builder;
+use libc::c_int;
+
+#[derive(Debug)]
+pub struct QrDecompositionFitter<'a> {
+    data: &'a Data,
+    lm: LinearModel<'a>,
+}
+
+impl<'a> QrDecompositionFitter<'a> {
+    pub fn new(data: &'a Data) -> Self {
+        QrDecompositionFitter {
+            data,
+            lm: LinearModel::new(data),
+        }
+    }
+
+    pub fn x(&self) -> &RealMatrix {
+        &self.data.x
+    }
+
+    pub fn y(&self) -> &RealMatrix {
+        &self.data.y
+    }
+}
+
+impl<'a> FitLinearModel for QrDecompositionFitter<'a> {
+    /// Use the QR decomposition method to fit the linear model to the data.
+    /// Calls the FFI function that wraps the LINPACK dqrls subroutine below.
+    /// The function signature is:
+    /// ```fortran
+    /// subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
+    /// ```g
+    ///
+    /// # Returns
+    ///
+    fn fit(&self) -> Result<RealMatrix, LmFitterError> {
+        let mut fitter = FortranLeastSquaresQrDecomposition::new(self.data, None);
+        let result = fitter.dqrls();
+        match result {
+            Ok(fitted) => Ok(fitted.beta),
+            Err(_e) => Err(LmFitterError::Unknown),
+        }
+    }
+
+    fn x(&self) -> &RealMatrix {
+        self.data.x()
+    }
+
+    fn y(&self) -> &RealMatrix {
+        self.data.y()
+    }
+}
+
 /*
 This is a Rust implementation of the LINPACK dqrls subroutine. The original
 Fortran code is in this file:
@@ -127,22 +405,6 @@ Fortran code is in this file:
 Definition of the dqrls subroutine:
     * subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
 */
-
-use crate::{errors::FortranLeastSquaresError, real_matrix::RealMatrix};
-use derive_builder::Builder;
-use libc::c_int;
-
-#[derive(Debug, Clone)]
-pub struct LinearSystem {
-    pub x: RealMatrix,
-    pub y: RealMatrix,
-}
-
-impl LinearSystem {
-    pub fn new(x: RealMatrix, y: RealMatrix) -> Self {
-        LinearSystem { x, y }
-    }
-}
 
 extern "C" {
     /// This is the FFI function that calls the LINPACK dqrls subroutine.
@@ -204,17 +466,14 @@ type AuxiliaryInformation = Vec<f64>;
 type Work = Vec<f64>;
 
 #[derive(Debug, Builder)]
-pub struct FortranLeastSquaresQrDecomposition {
-    pub xy: LinearSystem,
+pub struct FortranLeastSquaresQrDecomposition<'a> {
+    pub data: &'a Data,
     pub tol: Option<f64>,
 }
 
-impl FortranLeastSquaresQrDecomposition {
-    pub fn new(x: RealMatrix, y: RealMatrix, tol: Option<f64>) -> Self {
-        Self {
-            xy: LinearSystem::new(x, y),
-            tol,
-        }
+impl<'a> FortranLeastSquaresQrDecomposition<'a> {
+    pub fn new(data: &'a Data, tol: Option<f64>) -> Self {
+        Self { data, tol }
     }
 
     pub fn dqrls(&mut self) -> Result<FortranLeastSquaresReturn, FortranLeastSquaresError> {
@@ -227,10 +486,10 @@ impl FortranLeastSquaresQrDecomposition {
 
         unsafe {
             f_dqrls(
-                self.xy.x.as_slice_mut().unwrap().as_mut_ptr(),
+                self.data.x.as_slice().unwrap().as_ptr() as *mut f64,
                 &n_rows,
                 &n_cols,
-                self.xy.y.as_slice().unwrap().as_ptr(),
+                self.data.y.as_slice().unwrap().as_ptr(),
                 &n_cols_y,
                 &self.tol(),
                 coefficients.as_slice_mut().unwrap().as_mut_ptr(),
@@ -268,9 +527,9 @@ impl FortranLeastSquaresQrDecomposition {
     /// ```
     pub fn get_dimensions(&self) -> (c_int, c_int, c_int) {
         (
-            self.xy.x.n_rows() as c_int,
-            self.xy.x.n_cols() as c_int,
-            self.xy.y.n_cols() as c_int,
+            self.data.x().n_rows() as c_int,
+            self.data.x().n_cols() as c_int,
+            self.data.y().n_cols() as c_int,
         )
     }
 
@@ -291,9 +550,9 @@ impl FortranLeastSquaresQrDecomposition {
     /// ```
     pub fn allocate_solution_arrays(&self) -> (RealMatrix, RealMatrix, RealMatrix) {
         (
-            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Solution vector
-            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Residuals
-            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Q-transposed times Y
+            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Solution vector
+            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Residuals
+            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Q-transposed times Y
         )
     }
 
@@ -313,9 +572,9 @@ impl FortranLeastSquaresQrDecomposition {
     /// ```
     pub fn allocate_auxiliary_arrays(&self) -> (ColumnPivot, AuxiliaryInformation, Work) {
         (
-            vec![0 as c_int; self.xy.x.n_cols()], // Column pivot vector
-            vec![0.0; self.xy.x.n_cols()],        // Auxiliary information
-            vec![0.0; self.xy.x.n_cols()],        // Work array
+            vec![0 as c_int; self.data.x().n_cols()], // Column pivot vector
+            vec![0.0; self.data.x().n_cols()],        // Auxiliary information
+            vec![0.0; self.data.x().n_cols()],        // Work array
         )
     }
     /// Get the tolerance for determining the rank of the matrix
@@ -331,5 +590,53 @@ impl FortranLeastSquaresQrDecomposition {
     /// ```
     fn tol(&self) -> f64 {
         self.tol.unwrap_or(1e-10)
+    }
+}
+// src/fitters/fit.rs
+
+use super::qr_decomposition_fitter::QrDecompositionFitter;
+use crate::errors::LmFitterError;
+use crate::RealMatrix;
+
+/// A trait for fitting a linear regression model to a dataset.
+///
+/// This trait is implemented for the `LinearSystemSolver` enum, which allows the user to choose
+/// the desired strategy for solving the linear system. Each strategy is implemented in a separate
+/// module, and must also implement the `SolveLinearRegression` trait.
+pub trait FitLinearModel {
+    /// Fit the linear regression model to the data.
+    fn fit(&self) -> Result<RealMatrix, LmFitterError>;
+
+    /// Get the x matrix.
+    fn x(&self) -> &RealMatrix;
+
+    /// Get the y matrix.
+    fn y(&self) -> &RealMatrix;
+}
+
+/// An enum representing the available strategies for fitting a linear model to a dataset.
+#[derive(Debug)]
+pub enum LinearModelFitter<'a> {
+    /// Fit the linear model using the QR decomposition method.
+    QrDecomposition(QrDecompositionFitter<'a>),
+}
+
+impl<'a> FitLinearModel for LinearModelFitter<'a> {
+    fn fit(&self) -> Result<RealMatrix, LmFitterError> {
+        match self {
+            LinearModelFitter::QrDecomposition(fitter) => fitter.fit(),
+        }
+    }
+
+    fn x(&self) -> &RealMatrix {
+        match self {
+            LinearModelFitter::QrDecomposition(fitter) => fitter.x(),
+        }
+    }
+
+    fn y(&self) -> &RealMatrix {
+        match self {
+            LinearModelFitter::QrDecomposition(fitter) => fitter.y(),
+        }
     }
 }

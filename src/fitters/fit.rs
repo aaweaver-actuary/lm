@@ -1,3 +1,5 @@
+// src/fitters/fit.rs
+
 use super::qr_decomposition_fitter::QrDecompositionFitter;
 use crate::errors::LmFitterError;
 use crate::RealMatrix;
@@ -20,12 +22,12 @@ pub trait FitLinearModel {
 
 /// An enum representing the available strategies for fitting a linear model to a dataset.
 #[derive(Debug)]
-pub enum LinearModelFitter {
+pub enum LinearModelFitter<'a> {
     /// Fit the linear model using the QR decomposition method.
-    QrDecomposition(QrDecompositionFitter),
+    QrDecomposition(QrDecompositionFitter<'a>),
 }
 
-impl FitLinearModel for LinearModelFitter {
+impl<'a> FitLinearModel for LinearModelFitter<'a> {
     fn fit(&self) -> Result<RealMatrix, LmFitterError> {
         match self {
             LinearModelFitter::QrDecomposition(fitter) => fitter.fit(),

@@ -1,3 +1,5 @@
+// src/linear_model.rs
+
 use crate::fitters::fit::FitLinearModel;
 use crate::{Data, RealMatrix};
 use std::cmp::Ordering::{Equal, Greater, Less};

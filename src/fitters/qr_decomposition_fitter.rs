@@ -1,3 +1,5 @@
+// src/fitters/qr_decomposition_fitter.rs
+
 use super::fit::FitLinearModel;
 use crate::errors::{FortranLeastSquaresError, LmFitterError};
 use crate::linear_model::LinearModel;
@@ -145,7 +147,7 @@ impl<'a> FortranLeastSquaresQrDecomposition<'a> {
 
         unsafe {
             f_dqrls(
-                self.data.x.as_slice().unwrap().as_ptr(),
+                self.data.x.as_slice().unwrap().as_ptr() as *mut f64,
                 &n_rows,
                 &n_cols,
                 self.data.y.as_slice().unwrap().as_ptr(),
