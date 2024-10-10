@@ -1,0 +1,335 @@
+use ndarray::Array2;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RealMatrix {
+    pub data: Array2<f64>,
+}
+
+impl RealMatrix {
+    pub fn new(data: Array2<f64>) -> Self {
+        RealMatrix { data }
+    }
+
+    pub fn with_shape(n_rows: usize, n_cols: usize) -> Self {
+        RealMatrix {
+            data: Array2::<f64>::zeros((n_rows, n_cols)),
+        }
+    }
+
+    pub fn from_vec(data: Vec<f64>, n_rows: usize, n_cols: Option<usize>) -> Self {
+        RealMatrix {
+            data: Array2::<f64>::from_shape_vec((n_rows, n_cols.unwrap_or(1)), data).unwrap(),
+        }
+    }
+
+    pub fn as_slice(&self) -> Option<&[f64]> {
+        self.data.as_slice()
+    }
+
+    pub fn as_slice_mut(&mut self) -> Option<&mut [f64]> {
+        self.data.as_slice_mut()
+    }
+
+    pub fn shape(&self) -> &[usize; 2] {
+        self.data
+            .shape()
+            .try_into()
+            .expect("Shape should have exactly 2 elements")
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.data.shape()[0]
+    }
+
+    pub fn n_cols(&self) -> usize {
+        self.data.shape()[1]
+    }
+
+    pub fn is_vec(&self) -> bool {
+        self.n_cols() == 1 || self.n_rows() == 1
+    }
+}
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum FortranLeastSquaresError {
+    #[error("Matrix dimensions mismatch: expected ({expected_rows}, {expected_cols}), found ({found_rows}, {found_cols})")]
+    DimensionMismatch {
+        expected_rows: usize,
+        expected_cols: usize,
+        found_rows: usize,
+        found_cols: usize,
+    },
+    #[error("Failed to convert RealMatrix to slice")]
+    SliceConversionFailure,
+    #[error("Null pointer detected during FFI call")]
+    NullPointer,
+    #[error("Unknown error occurred in Fortran function call")]
+    Unknown,
+}
+pub mod dqrls;
+pub mod errors;
+pub mod real_matrix;
+
+use ndarray::Array2;
+
+pub struct QrDecomposition {
+    pub q: Array2<f64>,
+    pub r: Array2<f64>,
+}
+
+pub fn check_that_x_is_a_2d_matrix(x: &Array2<f64>) {
+    assert_eq!(x.ndim(), 2);
+}
+
+pub fn extract_dimensions_of_a_2d_matrix(x: &Array2<f64>) -> (usize, usize) {
+    (x.shape()[0], x.shape()[1])
+}
+
+pub fn check_that_x_and_y_have_the_same_number_of_rows(x: &Array2<f64>, y: &Array2<f64>) {
+    assert_eq!(x.shape()[0], y.shape()[0]);
+}
+
+pub fn check_that_2d_matrix_x_is_numeric(x: &Array2<f64>) {
+    assert!(x.iter().all(|&v| v.is_finite()));
+}
+
+pub fn initialize_qr_decomposition(q: Array2<f64>, r: Array2<f64>) -> QrDecomposition {
+    QrDecomposition { q, r }
+}
+
+pub fn initialize_coefficients_vector(n: usize) -> Array2<f64> {
+    Array2::zeros((n, 1))
+}
+
+pub fn initialize_residuals_vector(n: usize) -> Array2<f64> {
+    Array2::zeros((n, 1))
+}
+
+pub fn initialize_effects_vector(n: usize) -> Array2<f64> {
+    Array2::zeros((n, 1))
+}
+
+pub fn initialize_pivots_vector(n: usize) -> Array2<f64> {
+    Array2::zeros((n, 1))
+}
+
+pub fn initialize_qr_auxiliary_matrix(n: usize) -> QrDecomposition {
+    let q = Array2::zeros((n, n));
+    let r = Array2::zeros((n, n));
+    initialize_qr_decomposition(q, r)
+}
+/*
+This is a Rust implementation of the LINPACK dqrls subroutine. The original
+Fortran code is in this file:
+    * dqrls.f (/src/fortran/dqrls.f)[/src/bin/libdqrls.so]
+
+Definition of the dqrls subroutine:
+    * subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
+*/
+
+use crate::{errors::FortranLeastSquaresError, real_matrix::RealMatrix};
+use derive_builder::Builder;
+use libc::c_int;
+
+#[derive(Debug, Clone)]
+pub struct LinearSystem {
+    pub x: RealMatrix,
+    pub y: RealMatrix,
+}
+
+impl LinearSystem {
+    pub fn new(x: RealMatrix, y: RealMatrix) -> Self {
+        LinearSystem { x, y }
+    }
+}
+
+extern "C" {
+    /// This is the FFI function that calls the LINPACK dqrls subroutine.
+    /// The function signature is:
+    /// ```fortran
+    /// subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
+    /// ```
+    ///
+    /// # Parameters
+    /// * `x` is a matrix of real numbers representing the independent variables.
+    /// * `n` is the number of rows in the matrix `x`.
+    /// * `p` is the number of columns in the matrix `x`.
+    /// * `y` is a matrix of real numbers representing the dependent variables.
+    /// * `ny` is the number of columns in the matrix `y`.
+    /// * `tol` is the tolerance for determining the rank of the matrix.
+    /// * `b` is a matrix of real numbers representing the coefficients in a linear model.
+    /// * `rsd` is a matrix of real numbers representing the residuals.
+    /// * `qty` is a matrix of real numbers representing the Q-transposed times Y matrix.
+    /// * `k` is the number of columns used in the solution.
+    /// * `jpvt` is the pivot vector for the matrix `x`.
+    /// * `qraux` is auxiliary information for the QR decomposition.
+    /// * `work` is a work array.
+    fn f_dqrls(
+        x: *mut f64,      // Matrix X (modified in place)
+        n: *const c_int,  // Number of rows in X
+        p: *const c_int,  // Number of columns in X
+        y: *const f64,    // Right-hand side matrix Y
+        ny: *const c_int, // Number of columns in Y
+        tol: *const f64,  // Tolerance for determining rank
+        b: *mut f64,      // Solution matrix B
+        rsd: *mut f64,    // Residual matrix
+        qty: *mut f64,    // Q-transposed times Y matrix
+        k: *mut c_int,    // Number of columns used in solution
+        jpvt: *mut c_int, // Pivot vector for X
+        qraux: *mut f64,  // Auxiliary information for QR decomposition
+        work: *mut f64,   // Work array
+    );
+}
+
+#[derive(Debug, Builder)]
+pub struct FortranLeastSquaresReturn {
+    /// `beta` is a matrix of real numbers representing the coefficients
+    /// in a linear model. It is used to store the estimated parameters
+    /// after fitting the model to the data.
+    pub beta: RealMatrix,
+    pub residuals: RealMatrix,
+    pub q_transposed_times_y: RealMatrix,
+    pub qr_decomp_auxiliary_information: RealMatrix,
+}
+
+impl FortranLeastSquaresReturn {
+    pub fn builder() -> FortranLeastSquaresReturnBuilder {
+        FortranLeastSquaresReturnBuilder::default()
+    }
+}
+
+type ColumnPivot = Vec<c_int>;
+type AuxiliaryInformation = Vec<f64>;
+type Work = Vec<f64>;
+
+#[derive(Debug, Builder)]
+pub struct FortranLeastSquaresQrDecomposition {
+    pub xy: LinearSystem,
+    pub tol: Option<f64>,
+}
+
+impl FortranLeastSquaresQrDecomposition {
+    pub fn new(x: RealMatrix, y: RealMatrix, tol: Option<f64>) -> Self {
+        Self {
+            xy: LinearSystem::new(x, y),
+            tol,
+        }
+    }
+
+    pub fn dqrls(&mut self) -> Result<FortranLeastSquaresReturn, FortranLeastSquaresError> {
+        let (n_rows, n_cols, n_cols_y) = self.get_dimensions();
+        let (mut coefficients, mut residuals, mut qty) = self.allocate_solution_arrays();
+        let (mut jpvt, mut qraux, mut work) = self.allocate_auxiliary_arrays();
+
+        // Initialize number of columns used (k)
+        let mut n_columns_used: i32 = 0 as c_int;
+
+        unsafe {
+            f_dqrls(
+                self.xy.x.as_slice_mut().unwrap().as_mut_ptr(),
+                &n_rows,
+                &n_cols,
+                self.xy.y.as_slice().unwrap().as_ptr(),
+                &n_cols_y,
+                &self.tol(),
+                coefficients.as_slice_mut().unwrap().as_mut_ptr(),
+                residuals.as_slice_mut().unwrap().as_mut_ptr(),
+                qty.as_slice_mut().unwrap().as_mut_ptr(),
+                &mut n_columns_used,
+                jpvt.as_mut_ptr(),
+                qraux.as_mut_ptr(),
+                work.as_mut_ptr(),
+            );
+        }
+
+        // Return the computed matrices
+        Ok(FortranLeastSquaresReturn::builder()
+            .beta(coefficients)
+            .residuals(residuals)
+            .q_transposed_times_y(qty)
+            .qr_decomp_auxiliary_information(RealMatrix::from_vec(qraux, n_cols as usize, None))
+            .build()
+            .unwrap())
+    }
+
+    /// Get the dimensions of the input matrices
+    ///
+    /// # Example
+    /// ```
+    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, LinearSystem, RealMatrix};
+    /// use ndarray::Array2;
+    ///
+    /// let x = RealMatrix::with_shape(3, 2);
+    /// let y = RealMatrix::with_shape(3, 1);
+    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
+    /// assert_eq!(dqrls.get_dimensions(), (3, 2, 1));
+    /// assert_eq!(dqrls.get_dimensions(), (x.n_rows() as i32, x.n_cols() as i32, y.n_cols() as i32));
+    /// ```
+    pub fn get_dimensions(&self) -> (c_int, c_int, c_int) {
+        (
+            self.xy.x.n_rows() as c_int,
+            self.xy.x.n_cols() as c_int,
+            self.xy.y.n_cols() as c_int,
+        )
+    }
+
+    /// Allocate solution arrays for the QR decomposition
+    ///
+    /// # Example
+    /// ```
+    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
+    /// use ndarray::Array2;
+    ///
+    /// let x = RealMatrix::with_shape(3, 2);
+    /// let y = RealMatrix::with_shape(3, 1);
+    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
+    /// let (b, rsd, qty) = dqrls.allocate_solution_arrays();
+    /// assert_eq!(b, RealMatrix::with_shape(3, 1));
+    /// assert_eq!(rsd, RealMatrix::with_shape(3, 1));
+    /// assert_eq!(qty, RealMatrix::with_shape(3, 1));
+    /// ```
+    pub fn allocate_solution_arrays(&self) -> (RealMatrix, RealMatrix, RealMatrix) {
+        (
+            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Solution vector
+            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Residuals
+            RealMatrix::with_shape(self.xy.x.n_rows(), self.xy.y.n_cols()), // Q-transposed times Y
+        )
+    }
+
+    /// Allocate auxiliary arrays for the QR decomposition
+    ///
+    /// # Example
+    /// ```
+    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
+    ///
+    /// let x = RealMatrix::with_shape(3, 2);
+    /// let y = RealMatrix::with_shape(3, 1);
+    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
+    /// let (jpvt, qraux, work) = dqrls.allocate_auxiliary_arrays();
+    /// assert_eq!(jpvt, vec![0, 0]);
+    /// assert_eq!(qraux, vec![0.0, 0.0]);
+    /// assert_eq!(work, vec![0.0, 0.0, 0.0, 0.0]);
+    /// ```
+    pub fn allocate_auxiliary_arrays(&self) -> (ColumnPivot, AuxiliaryInformation, Work) {
+        (
+            vec![0 as c_int; self.xy.x.n_cols()], // Column pivot vector
+            vec![0.0; self.xy.x.n_cols()],        // Auxiliary information
+            vec![0.0; self.xy.x.n_cols()],        // Work array
+        )
+    }
+    /// Get the tolerance for determining the rank of the matrix
+    ///
+    /// # Example
+    /// ```
+    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
+    ///
+    /// let x = RealMatrix::with_shape(3, 2);
+    /// let y = RealMatrix::with_shape(3, 1);
+    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, Some(1e-10));
+    /// assert_eq!(dqrls.tol(), 1e-10);
+    /// ```
+    fn tol(&self) -> f64 {
+        self.tol.unwrap_or(1e-10)
+    }
+}
