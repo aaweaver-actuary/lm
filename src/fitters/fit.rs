@@ -1,3 +1,8 @@
+//! This module contains the `FitModel` trait, which is implemented for the `LinearModelFitter`
+//! enum. The `LinearModelFitter` enum represents the available strategies for fitting a linear
+//! model to a dataset, and the `FitModel` trait provides a common interface for fitting the model
+//! using any of the available strategies.
+
 // src/fitters/fit.rs
 
 use super::qr_decomposition_fitter::QrDecompositionFitter;
@@ -9,7 +14,7 @@ use crate::RealMatrix;
 /// This trait is implemented for the `LinearSystemSolver` enum, which allows the user to choose
 /// the desired strategy for solving the linear system. Each strategy is implemented in a separate
 /// module, and must also implement the `SolveLinearRegression` trait.
-pub trait FitLinearModel {
+pub trait FitModel {
     /// Fit the linear regression model to the data.
     fn fit(&self) -> Result<RealMatrix, LmFitterError>;
 
@@ -27,7 +32,7 @@ pub enum LinearModelFitter<'a> {
     QrDecomposition(QrDecompositionFitter<'a>),
 }
 
-impl<'a> FitLinearModel for LinearModelFitter<'a> {
+impl<'a> FitModel for LinearModelFitter<'a> {
     fn fit(&self) -> Result<RealMatrix, LmFitterError> {
         match self {
             LinearModelFitter::QrDecomposition(fitter) => fitter.fit(),

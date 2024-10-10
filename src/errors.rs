@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum FortranLeastSquaresError {
+pub enum LeastSquaresError {
     #[error("Matrix dimensions mismatch: expected ({expected_rows}, {expected_cols}), found ({found_rows}, {found_cols})")]
     DimensionMismatch {
         expected_rows: usize,

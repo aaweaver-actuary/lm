@@ -17,16 +17,47 @@ pub struct RealMatrix {
 impl Iterator for RealMatrix {
     type Item = f64;
 
+    /// Implement the Iterator trait for the RealMatrix struct. This allows the user to iterate
+    /// over the elements of the matrix using a for loop or other iterator methods.
+    /// The iterator is implemented as a simple wrapper around the iterator for the underlying
+    /// ndarray::Array2 type.
     fn next(&mut self) -> Option<Self::Item> {
         self.values.iter().next().copied()
     }
 }
 
 impl RealMatrix {
+    /// Create a new RealMatrix instance from an ndarray::Array2.
     pub fn new(data: Array2<f64>) -> Self {
         RealMatrix { values: data }
     }
 
+    /// Create a new RealMatrix instance with the specified number of rows and columns.
+    /// The matrix is initialized with zeros.
+    ///
+    /// # Arguments
+    /// * `n_rows` - The number of rows in the matrix.
+    /// * `n_cols` - The number of columns in the matrix.
+    ///
+    /// # Returns
+    /// A new RealMatrix instance with the specified shape, initialized with zeros.
+    ///
+    /// # Example
+    /// ```
+    /// use lm::types::RealMatrix;
+    ///
+    /// let matrix = RealMatrix::with_shape(3, 2);
+    /// assert_eq!(matrix.n_rows(), 3);
+    /// assert_eq!(matrix.n_cols(), 2);
+    ///
+    /// // The matrix is initialized with zeros
+    /// for value in matrix.values.iter() {
+    ///    assert_eq!(*value, 0.0);
+    /// }
+    ///
+    /// // The matrix is not empty
+    /// assert!(!matrix.is_empty());
+    /// ```
     pub fn with_shape(n_rows: usize, n_cols: usize) -> Self {
         RealMatrix {
             values: Array2::<f64>::zeros((n_rows, n_cols)),
@@ -41,7 +72,7 @@ impl RealMatrix {
 
     pub fn transpose(&self) -> RealMatrix {
         RealMatrix {
-            values: self.values.to_owned().t(),
+            values: self.values.to_owned().reversed_axes(),
         }
     }
 

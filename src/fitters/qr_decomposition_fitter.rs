@@ -1,36 +1,118 @@
+//! This module contains the implementation of the QR decomposition model fitter.
+//! It is the primary implementation of the `FitModel` trait for the `LinearModelFitter` enum,
+//! and is used to fit a linear model to a dataset using ordinary least squares (OLS) with
+//! the QR decomposition method.
+//!
+//! # Structs
+//!
+//! ## `QrDecompositionFitter`
+//!
+//! A struct that implements the `FitModel` trait for fitting a linear model to a dataset using
+//! the QR decomposition method.
+//!
+//! ### Public Fields
+//!
+//! * `data`: A zero-copy struct that holds the data for the linear model.
+//! * `tol`: An optional tolerance value for determining the rank of the matrix.
+//!
+//! ### Private Fields
+//!
+//! * `beta_array`: A pre-allocated array for storing the working solution vector.
+//! * `residual_array`: A pre-allocated array for storing the residuals.
+//! * `q_transposed_times_y`: A pre-allocated array for storing the Q-transposed times Y matrix. If Q
+//!    originally has dimensions (n x n), and Y has dimensions (n x m), the result of the matrix
+//!    multiplication is a matrix with dimensions (n x m), so the pre-allocated array has
+//!    (n x m) elements.
+//!
+//! ### Methods
+//!
+//! * `new(data: &'a Data, tol: Option<Tolerance>) -> Self`: Create a new instance of the
+//!   `QrDecompositionFitter` struct.
+//! * `perform_qr_decomposition(&mut self) -> Result<LeastSquaresReturn, LeastSquaresError>`:
+
 // src/fitters/qr_decomposition_fitter.rs
 
-use super::fit::FitLinearModel;
-use crate::errors::{FortranLeastSquaresError, LmFitterError};
-use crate::linear_model::LinearModel;
-use crate::{Data, RealMatrix};
+use super::fit::FitModel;
+use crate::errors::LmFitterError;
+// use crate::fortran::dqrls::FortranDqrls;
+use crate::types::{Data, RealMatrix, Tolerance};
 use derive_builder::Builder;
-use libc::c_int;
 
-#[derive(Debug)]
+#[derive(Debug, Builder)]
 pub struct QrDecompositionFitter<'a> {
-    data: &'a Data,
-    lm: LinearModel<'a>,
+    pub data: &'a Data,
+    pub tol: Tolerance,
 }
 
 impl<'a> QrDecompositionFitter<'a> {
-    pub fn new(data: &'a Data) -> Self {
-        QrDecompositionFitter {
+    /// Return a new instance of the `QrDecompositionFitter` struct. Takes a reference to the data
+    /// for the linear model and an optional tolerance value for determining the rank of the matrix.
+    /// If no tolerance value is provided, the default value is used.
+    ///
+    /// # Example
+    /// ```
+    /// use lm::{fitters::QrDecompositionFitter, Data, RealMatrix};
+    /// use lm::types::Tolerance;
+    ///
+    /// let x = RealMatrix::with_shape(3, 2);
+    /// let y = RealMatrix::with_shape(3, 1);
+    /// let data = Data::new(x, y);
+    /// let fitter = QrDecompositionFitter::new(&data, Some(Tolerance(1e-5)));
+    ///
+    /// assert_eq!(fitter.x(), &x);
+    /// assert_eq!(fitter.y(), &y);
+    /// assert_eq!(fitter.tol(), 1e-5);
+    /// ```
+    pub fn new(data: &'a Data, tol: Option<Tolerance>) -> Self {
+        Self {
             data,
-            lm: LinearModel::new(data),
+            tol: tol.unwrap_or_default(),
+            // Pre-allocate arrays for the solution, residuals, and Q-transposed times Y
+
+            /*             // 1 element per column in X (eg per parameter)
+            beta_array: vec![0.0; data.x().n_cols()],
+
+            // 1 element per row in X (eg per observation)
+            residual_array: vec![0.0; data.x().n_rows()],
+
+            // 1 element per row in X (eg per observation) * number of columns in Y
+            q_transposed_times_y: vec![0.0; data.x().n_rows() * data.y().n_cols()], */
         }
     }
 
+    /// Return the x matrix from the data struct.
     pub fn x(&self) -> &RealMatrix {
         &self.data.x
     }
 
+    /// Return the y matrix from the data struct.
     pub fn y(&self) -> &RealMatrix {
         &self.data.y
     }
+
+    /// Return the unwrapped tolerance value. If no tolerance value is provided, the default value
+    /// is used.
+    pub fn tol(&self) -> f64 {
+        self.tol.value()
+    }
+
+    /*     /// Return the solution vector from the QR decomposition.
+    fn beta(&self) -> &Vec<f64> {
+        &self.beta_array
+    }
+
+    /// Return the residuals from the QR decomposition.
+    fn resid(&self) -> &Vec<f64> {
+        &self.residual_array
+    }
+
+    /// Return the Q-transposed times Y matrix from the QR decomposition.
+    fn qty(&self) -> &Vec<f64> {
+        &self.q_transposed_times_y
+    } */
 }
 
-impl<'a> FitLinearModel for QrDecompositionFitter<'a> {
+impl<'a> FitModel for QrDecompositionFitter<'a> {
     /// Use the QR decomposition method to fit the linear model to the data.
     /// Calls the FFI function that wraps the LINPACK dqrls subroutine below.
     /// The function signature is:
@@ -41,8 +123,14 @@ impl<'a> FitLinearModel for QrDecompositionFitter<'a> {
     /// # Returns
     ///
     fn fit(&self) -> Result<RealMatrix, LmFitterError> {
-        let mut fitter = FortranLeastSquaresQrDecomposition::new(self.data, None);
-        let result = fitter.dqrls();
+        // let result = self.perform_qr_decomposition();
+        struct Temp {
+            beta: RealMatrix,
+        }
+
+        let result: Result<Temp, LmFitterError> = Ok(Temp {
+            beta: RealMatrix::with_shape(1, 1),
+        });
         match result {
             Ok(fitted) => Ok(fitted.beta),
             Err(_e) => Err(LmFitterError::Unknown),
@@ -56,53 +144,6 @@ impl<'a> FitLinearModel for QrDecompositionFitter<'a> {
     fn y(&self) -> &RealMatrix {
         self.data.y()
     }
-}
-
-/*
-This is a Rust implementation of the LINPACK dqrls subroutine. The original
-Fortran code is in this file:
-    * dqrls.f (/src/fortran/dqrls.f)[/src/bin/libdqrls.so]
-
-Definition of the dqrls subroutine:
-    * subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
-*/
-
-extern "C" {
-    /// This is the FFI function that calls the LINPACK dqrls subroutine.
-    /// The function signature is:
-    /// ```fortran
-    /// subroutine dqrls(x,n,p,y,ny,tol,b,rsd,qty,k,jpvt,qraux,work)
-    /// ```
-    ///
-    /// # Parameters
-    /// * `x` is a matrix of real numbers representing the independent variables.
-    /// * `n` is the number of rows in the matrix `x`.
-    /// * `p` is the number of columns in the matrix `x`.
-    /// * `y` is a matrix of real numbers representing the dependent variables.
-    /// * `ny` is the number of columns in the matrix `y`.
-    /// * `tol` is the tolerance for determining the rank of the matrix.
-    /// * `b` is a matrix of real numbers representing the coefficients in a linear model.
-    /// * `rsd` is a matrix of real numbers representing the residuals.
-    /// * `qty` is a matrix of real numbers representing the Q-transposed times Y matrix.
-    /// * `k` is the number of columns used in the solution.
-    /// * `jpvt` is the pivot vector for the matrix `x`.
-    /// * `qraux` is auxiliary information for the QR decomposition.
-    /// * `work` is a work array.
-    fn f_dqrls(
-        x: *mut f64,      // Matrix X (modified in place)
-        n: *const c_int,  // Number of rows in X
-        p: *const c_int,  // Number of columns in X
-        y: *const f64,    // Right-hand side matrix Y
-        ny: *const c_int, // Number of columns in Y
-        tol: *const f64,  // Tolerance for determining rank
-        b: *mut f64,      // Solution matrix B
-        rsd: *mut f64,    // Residual matrix
-        qty: *mut f64,    // Q-transposed times Y matrix
-        k: *mut c_int,    // Number of columns used in solution
-        jpvt: *mut c_int, // Pivot vector for X
-        qraux: *mut f64,  // Auxiliary information for QR decomposition
-        work: *mut f64,   // Work array
-    );
 }
 
 #[derive(Debug, Builder)]
@@ -119,137 +160,5 @@ pub struct FortranLeastSquaresReturn {
 impl FortranLeastSquaresReturn {
     pub fn builder() -> FortranLeastSquaresReturnBuilder {
         FortranLeastSquaresReturnBuilder::default()
-    }
-}
-
-type ColumnPivot = Vec<c_int>;
-type AuxiliaryInformation = Vec<f64>;
-type Work = Vec<f64>;
-
-#[derive(Debug, Builder)]
-pub struct FortranLeastSquaresQrDecomposition<'a> {
-    pub data: &'a Data,
-    pub tol: Option<f64>,
-}
-
-impl<'a> FortranLeastSquaresQrDecomposition<'a> {
-    pub fn new(data: &'a Data, tol: Option<f64>) -> Self {
-        Self { data, tol }
-    }
-
-    pub fn dqrls(&mut self) -> Result<FortranLeastSquaresReturn, FortranLeastSquaresError> {
-        let (n_rows, n_cols, n_cols_y) = self.get_dimensions();
-        let (mut coefficients, mut residuals, mut qty) = self.allocate_solution_arrays();
-        let (mut jpvt, mut qraux, mut work) = self.allocate_auxiliary_arrays();
-
-        // Initialize number of columns used (k)
-        let mut n_columns_used: i32 = 0 as c_int;
-
-        unsafe {
-            f_dqrls(
-                self.data.x.as_slice().unwrap().as_ptr() as *mut f64,
-                &n_rows,
-                &n_cols,
-                self.data.y.as_slice().unwrap().as_ptr(),
-                &n_cols_y,
-                &self.tol(),
-                coefficients.as_slice_mut().unwrap().as_mut_ptr(),
-                residuals.as_slice_mut().unwrap().as_mut_ptr(),
-                qty.as_slice_mut().unwrap().as_mut_ptr(),
-                &mut n_columns_used,
-                jpvt.as_mut_ptr(),
-                qraux.as_mut_ptr(),
-                work.as_mut_ptr(),
-            );
-        }
-
-        // Return the computed matrices
-        Ok(FortranLeastSquaresReturn::builder()
-            .beta(coefficients)
-            .residuals(residuals)
-            .q_transposed_times_y(qty)
-            .qr_decomp_auxiliary_information(RealMatrix::from_vec(qraux, n_cols as usize, None))
-            .build()
-            .unwrap())
-    }
-
-    /// Get the dimensions of the input matrices
-    ///
-    /// # Example
-    /// ```
-    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, LinearSystem, RealMatrix};
-    /// use ndarray::Array2;
-    ///
-    /// let x = RealMatrix::with_shape(3, 2);
-    /// let y = RealMatrix::with_shape(3, 1);
-    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
-    /// assert_eq!(dqrls.get_dimensions(), (3, 2, 1));
-    /// assert_eq!(dqrls.get_dimensions(), (x.n_rows() as i32, x.n_cols() as i32, y.n_cols() as i32));
-    /// ```
-    pub fn get_dimensions(&self) -> (c_int, c_int, c_int) {
-        (
-            self.data.x().n_rows() as c_int,
-            self.data.x().n_cols() as c_int,
-            self.data.y().n_cols() as c_int,
-        )
-    }
-
-    /// Allocate solution arrays for the QR decomposition
-    ///
-    /// # Example
-    /// ```
-    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
-    /// use ndarray::Array2;
-    ///
-    /// let x = RealMatrix::with_shape(3, 2);
-    /// let y = RealMatrix::with_shape(3, 1);
-    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
-    /// let (b, rsd, qty) = dqrls.allocate_solution_arrays();
-    /// assert_eq!(b, RealMatrix::with_shape(3, 1));
-    /// assert_eq!(rsd, RealMatrix::with_shape(3, 1));
-    /// assert_eq!(qty, RealMatrix::with_shape(3, 1));
-    /// ```
-    pub fn allocate_solution_arrays(&self) -> (RealMatrix, RealMatrix, RealMatrix) {
-        (
-            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Solution vector
-            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Residuals
-            RealMatrix::with_shape(self.data.x().n_rows(), self.data.y().n_cols()), // Q-transposed times Y
-        )
-    }
-
-    /// Allocate auxiliary arrays for the QR decomposition
-    ///
-    /// # Example
-    /// ```
-    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
-    ///
-    /// let x = RealMatrix::with_shape(3, 2);
-    /// let y = RealMatrix::with_shape(3, 1);
-    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, None);
-    /// let (jpvt, qraux, work) = dqrls.allocate_auxiliary_arrays();
-    /// assert_eq!(jpvt, vec![0, 0]);
-    /// assert_eq!(qraux, vec![0.0, 0.0]);
-    /// assert_eq!(work, vec![0.0, 0.0, 0.0, 0.0]);
-    /// ```
-    pub fn allocate_auxiliary_arrays(&self) -> (ColumnPivot, AuxiliaryInformation, Work) {
-        (
-            vec![0 as c_int; self.data.x().n_cols()], // Column pivot vector
-            vec![0.0; self.data.x().n_cols()],        // Auxiliary information
-            vec![0.0; self.data.x().n_cols()],        // Work array
-        )
-    }
-    /// Get the tolerance for determining the rank of the matrix
-    ///
-    /// # Example
-    /// ```
-    /// use lm::dqrls::{FortranLeastSquaresQrDecomposition, RealMatrix};
-    ///
-    /// let x = RealMatrix::with_shape(3, 2);
-    /// let y = RealMatrix::with_shape(3, 1);
-    /// let dqrls = FortranLeastSquaresQrDecomposition::new(x, y, Some(1e-10));
-    /// assert_eq!(dqrls.tol(), 1e-10);
-    /// ```
-    fn tol(&self) -> f64 {
-        self.tol.unwrap_or(1e-10)
     }
 }

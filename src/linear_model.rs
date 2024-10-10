@@ -1,6 +1,6 @@
 // src/linear_model.rs
 
-use crate::fitters::fit::FitLinearModel;
+use crate::fitters::fit::FitModel;
 use crate::{Data, RealMatrix};
 use std::cmp::Ordering::{Equal, Greater, Less};
 
@@ -55,7 +55,7 @@ impl<'a> LinearModel<'a> {
         }
     }
 
-    pub fn fit(&mut self, fitter: &impl FitLinearModel) {
+    pub fn fit(&mut self, fitter: &impl FitModel) {
         match self {
             // If already fitted, re-fit the model.
             LinearModel::Fitted(_) => {

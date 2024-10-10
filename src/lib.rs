@@ -1,11 +1,12 @@
 // src/lib.rs
 
 pub mod data;
-pub mod dqrls;
 pub mod errors;
 pub mod fitters;
+pub mod fortran;
 pub mod linear_model;
 pub mod real_matrix;
+pub mod types;
 
 pub use data::Data;
 pub use real_matrix::RealMatrix;
